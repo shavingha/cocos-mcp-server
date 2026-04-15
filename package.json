@@ -8,7 +8,9 @@
     "scripts": {
         "preinstall": "node ./scripts/preinstall.js",
         "build": "tsc",
-        "watch": "tsc -w"
+        "watch": "tsc -w",
+        "test:protocol": "node ./scripts/test-streamable-http.js",
+        "test:validate-scene": "node ./scripts/test-validate-scene.js"
     },
     "description": "i18n:cocos-mcp-server.description",
     "main": "./dist/main.js",

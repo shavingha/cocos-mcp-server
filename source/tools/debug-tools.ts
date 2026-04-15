@@ -348,26 +348,49 @@ export class DebugTools implements ToolExecutor {
 
     private async validateScene(options: any): Promise<ToolResponse> {
         const issues: ValidationIssue[] = [];
+        const executedChecks: string[] = [];
+        const skippedChecks: string[] = [];
 
-        try {
-            // Check for missing assets
-            if (options.checkMissingAssets) {
-                const assetCheck = await Editor.Message.request('scene', 'check-missing-assets');
-                if (assetCheck && assetCheck.missing) {
+        if (options.checkMissingAssets) {
+            try {
+                const assetCheck = await this.checkMissingAssets();
+                if (assetCheck.supported) {
+                    executedChecks.push('missingAssets');
+
+                    if (assetCheck.missing.length > 0) {
+                        issues.push({
+                            type: 'error',
+                            category: 'assets',
+                            message: `Found ${assetCheck.missing.length} missing asset references`,
+                            details: assetCheck.missing
+                        });
+                    }
+                } else {
+                    skippedChecks.push('missingAssets');
                     issues.push({
-                        type: 'error',
-                        category: 'assets',
-                        message: `Found ${assetCheck.missing.length} missing asset references`,
-                        details: assetCheck.missing
+                        type: 'info',
+                        category: 'compatibility',
+                        message: 'Missing asset validation is not supported by the current Cocos Creator scene API',
+                        suggestion: 'Use assetAdvanced_validate_asset_references for project-wide checks or verify scene references in the editor.'
                     });
                 }
+            } catch (err: any) {
+                issues.push({
+                    type: 'warning',
+                    category: 'assets',
+                    message: `Missing asset validation failed: ${err.message}`,
+                    suggestion: 'Use assetAdvanced_validate_asset_references or inspect scene references manually.'
+                });
             }
+        }
 
-            // Check for performance issues
-            if (options.checkPerformance) {
+        if (options.checkPerformance) {
+            try {
                 const hierarchy = await Editor.Message.request('scene', 'query-hierarchy');
                 const nodeCount = this.countNodes(hierarchy.children);
-                
+
+                executedChecks.push('performance');
+
                 if (nodeCount > 1000) {
                     issues.push({
                         type: 'warning',
@@ -376,18 +399,88 @@ export class DebugTools implements ToolExecutor {
                         suggestion: 'Consider using object pooling or scene optimization'
                     });
                 }
+            } catch (err: any) {
+                issues.push({
+                    type: 'warning',
+                    category: 'performance',
+                    message: `Performance validation failed: ${err.message}`,
+                    suggestion: 'Retry after the scene is fully loaded.'
+                });
+            }
+        }
+
+        const errorCount = issues.filter(issue => issue.type === 'error').length;
+        const warningCount = issues.filter(issue => issue.type === 'warning').length;
+        const infoCount = issues.filter(issue => issue.type === 'info').length;
+
+        const result: ValidationResult & {
+            executedChecks: string[];
+            skippedChecks: string[];
+            summary: {
+                errorCount: number;
+                warningCount: number;
+                infoCount: number;
+            };
+        } = {
+            valid: errorCount === 0,
+            issueCount: issues.length,
+            issues: issues,
+            executedChecks,
+            skippedChecks,
+            summary: {
+                errorCount,
+                warningCount,
+                infoCount
+            }
+        };
+
+        return { success: true, data: result };
+    }
+
+    private async checkMissingAssets(): Promise<{ supported: boolean; missing: any[] }> {
+        try {
+            const assetCheck = await Editor.Message.request('scene', 'check-missing-assets');
+            return {
+                supported: true,
+                missing: this.extractMissingAssets(assetCheck)
+            };
+        } catch (err: any) {
+            if (this.isUnsupportedSceneMessageError(err, 'check-missing-assets')) {
+                return {
+                    supported: false,
+                    missing: []
+                };
             }
 
-            const result: ValidationResult = {
-                valid: issues.length === 0,
-                issueCount: issues.length,
-                issues: issues
-            };
-
-            return { success: true, data: result };
-        } catch (err: any) {
-            return { success: false, error: err.message };
+            throw err;
         }
+    }
+
+    private extractMissingAssets(assetCheck: any): any[] {
+        if (!assetCheck) {
+            return [];
+        }
+
+        if (Array.isArray(assetCheck)) {
+            return assetCheck;
+        }
+
+        if (Array.isArray(assetCheck.missing)) {
+            return assetCheck.missing;
+        }
+
+        if (Array.isArray(assetCheck.missingAssets)) {
+            return assetCheck.missingAssets;
+        }
+
+        return [];
+    }
+
+    private isUnsupportedSceneMessageError(err: any, messageName: string): boolean {
+        const errorMessage = err?.message || String(err || '');
+        return errorMessage.includes(`Message does not exist: scene - ${messageName}`)
+            || (errorMessage.includes('Message does not exist') && errorMessage.includes(messageName))
+            || (errorMessage.includes('Cannot find message') && errorMessage.includes(messageName));
     }
 
     private countNodes(nodes: any[]): number {

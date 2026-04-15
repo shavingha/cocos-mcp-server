@@ -16,6 +16,13 @@ import { SceneViewTools } from './tools/scene-view-tools';
 import { ReferenceImageTools } from './tools/reference-image-tools';
 import { AssetAdvancedTools } from './tools/asset-advanced-tools';
 import { ValidationTools } from './tools/validation-tools';
+import {
+    isJsonRpcNotification,
+    isJsonRpcRequest,
+    isJsonRpcResponse,
+    negotiateProtocolVersion,
+    normalizeJsonRpcMessages,
+} from './protocol';
 
 export class MCPServer {
     private settings: MCPServerSettings;
@@ -170,7 +177,7 @@ export class MCPServer {
         // Set CORS headers
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-        res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Mcp-Session-Id, Last-Event-ID');
         res.setHeader('Content-Type', 'application/json');
         
         if (req.method === 'OPTIONS') {
@@ -182,6 +189,15 @@ export class MCPServer {
         try {
             if (pathname === '/mcp' && req.method === 'POST') {
                 await this.handleMCPRequest(req, res);
+            } else if (pathname === '/mcp' && req.method === 'GET') {
+                // We only support request-response HTTP today, so explicitly reject SSE setup.
+                res.setHeader('Allow', 'POST, OPTIONS');
+                res.writeHead(405);
+                res.end();
+            } else if (pathname === '/mcp' && req.method === 'DELETE') {
+                res.setHeader('Allow', 'POST, GET, OPTIONS');
+                res.writeHead(405);
+                res.end();
             } else if (pathname === '/health' && req.method === 'GET') {
                 res.writeHead(200);
                 res.end(JSON.stringify({ status: 'ok', tools: this.toolsList.length }));
@@ -211,23 +227,55 @@ export class MCPServer {
         req.on('end', async () => {
             try {
                 // Enhanced JSON parsing with better error handling
-                let message;
+                let payload;
                 try {
-                    message = JSON.parse(body);
+                    payload = JSON.parse(body);
                 } catch (parseError: any) {
                     // Try to fix common JSON issues
                     const fixedBody = this.fixCommonJsonIssues(body);
                     try {
-                        message = JSON.parse(fixedBody);
+                        payload = JSON.parse(fixedBody);
                         console.log('[MCPServer] Fixed JSON parsing issue');
                     } catch (secondError) {
                         throw new Error(`JSON parsing failed: ${parseError.message}. Original body: ${body.substring(0, 500)}...`);
                     }
                 }
-                
-                const response = await this.handleMessage(message);
+
+                const messages = normalizeJsonRpcMessages(payload);
+                if (messages.length === 0) {
+                    throw new Error('JSON-RPC batch must not be empty');
+                }
+
+                const responses: any[] = [];
+
+                for (const message of messages) {
+                    if (isJsonRpcRequest(message)) {
+                        responses.push(await this.handleMessage(message));
+                        continue;
+                    }
+
+                    if (isJsonRpcNotification(message)) {
+                        await this.handleNotification(message);
+                        continue;
+                    }
+
+                    if (isJsonRpcResponse(message)) {
+                        // Streamable HTTP clients may send response envelopes in mixed workflows.
+                        continue;
+                    }
+
+                    throw new Error('Invalid JSON-RPC message');
+                }
+
+                if (responses.length === 0) {
+                    res.writeHead(202);
+                    res.end();
+                    return;
+                }
+
+                const responseBody = Array.isArray(payload) ? responses : responses[0];
                 res.writeHead(200);
-                res.end(JSON.stringify(response));
+                res.end(JSON.stringify(responseBody));
             } catch (error: any) {
                 console.error('Error handling MCP request:', error);
                 res.writeHead(400);
@@ -241,6 +289,29 @@ export class MCPServer {
                 }));
             }
         });
+    }
+
+    private async handleNotification(message: any): Promise<void> {
+        const { method } = message;
+
+        switch (method) {
+            case 'notifications/initialized':
+                if (this.settings.enableDebugLog) {
+                    console.log('[MCPServer] Client initialization completed');
+                }
+                return;
+            case 'notifications/cancelled':
+            case '$/cancelRequest':
+                if (this.settings.enableDebugLog) {
+                    console.log(`[MCPServer] Request cancelled: ${JSON.stringify(message.params || {})}`);
+                }
+                return;
+            default:
+                if (this.settings.enableDebugLog) {
+                    console.log(`[MCPServer] Ignoring notification: ${method}`);
+                }
+                return;
+        }
     }
 
     private async handleMessage(message: any): Promise<any> {
@@ -261,7 +332,7 @@ export class MCPServer {
                 case 'initialize':
                     // MCP initialization
                     result = {
-                        protocolVersion: '2024-11-05',
+                        protocolVersion: negotiateProtocolVersion(params?.protocolVersion),
                         capabilities: {
                             tools: {}
                         },
@@ -270,6 +341,9 @@ export class MCPServer {
                             version: '1.0.0'
                         }
                     };
+                    break;
+                case 'ping':
+                    result = {};
                     break;
                 default:
                     throw new Error(`Unknown method: ${method}`);

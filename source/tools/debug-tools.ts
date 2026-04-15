@@ -281,18 +281,19 @@ export class DebugTools implements ToolExecutor {
 
                 try {
                     const nodeData = await Editor.Message.request('scene', 'query-node', nodeUuid);
+                    const childNodeIds = this.extractChildNodeIds(nodeData.children);
                     
                     const tree = {
-                        uuid: nodeData.uuid,
-                        name: nodeData.name,
-                        active: nodeData.active,
-                        components: (nodeData as any).components ? (nodeData as any).components.map((c: any) => c.__type__) : [],
-                        childCount: nodeData.children ? nodeData.children.length : 0,
+                        uuid: this.getNodeFieldValue(nodeData, 'uuid', nodeUuid),
+                        name: this.getNodeFieldValue(nodeData, 'name', 'Unknown'),
+                        active: this.getNodeFieldValue(nodeData, 'active', true),
+                        components: this.extractComponentTypes(nodeData),
+                        childCount: childNodeIds.length,
                         children: [] as any[]
                     };
 
-                    if (nodeData.children && nodeData.children.length > 0) {
-                        for (const childId of nodeData.children) {
+                    if (childNodeIds.length > 0) {
+                        for (const childId of childNodeIds) {
                             const childTree = await buildTree(childId, depth + 1);
                             tree.children.push(childTree);
                         }
@@ -456,6 +457,34 @@ export class DebugTools implements ToolExecutor {
         }
     }
 
+    private extractChildNodeIds(children: any): string[] {
+        if (!Array.isArray(children)) {
+            return [];
+        }
+
+        return children
+            .map((child) => this.unwrapNodeIdentifier(child))
+            .filter((childId): childId is string => typeof childId === 'string' && childId.length > 0);
+    }
+
+    private extractComponentTypes(nodeData: any): string[] {
+        const rawComponents = nodeData?.__comps__ || nodeData?.components || nodeData?.value?.__comps__ || [];
+        if (!Array.isArray(rawComponents)) {
+            return [];
+        }
+
+        return rawComponents
+            .map((component: any) => {
+                const type = component?.__type__
+                    || component?.type?.value
+                    || component?.type
+                    || component?.name?.value
+                    || component?.name;
+                return typeof type === 'string' ? type : null;
+            })
+            .filter((type): type is string => !!type);
+    }
+
     private async getSceneHierarchyRootNodes(): Promise<any[]> {
         try {
             const hierarchy = await Editor.Message.request('scene', 'query-hierarchy');
@@ -480,7 +509,63 @@ export class DebugTools implements ToolExecutor {
             return [];
         }
 
-        return nodes.filter(node => node && typeof node === 'object' && node.uuid);
+        return nodes.filter(node => this.unwrapNodeIdentifier(node));
+    }
+
+    private getNodeFieldValue(nodeData: any, fieldName: string, fallback?: any): any {
+        const directValue = this.unwrapEditorProperty(nodeData?.[fieldName]);
+        if (directValue !== undefined) {
+            return directValue;
+        }
+
+        const nestedValue = this.unwrapEditorProperty(nodeData?.value?.[fieldName]);
+        if (nestedValue !== undefined) {
+            return nestedValue;
+        }
+
+        return fallback;
+    }
+
+    private unwrapNodeIdentifier(nodeRef: any): string | null {
+        const value = this.unwrapEditorProperty(nodeRef);
+
+        if (typeof value === 'string' && value.length > 0) {
+            return value;
+        }
+
+        if (value && typeof value === 'object') {
+            const uuid = this.unwrapEditorProperty((value as any).uuid);
+            if (typeof uuid === 'string' && uuid.length > 0) {
+                return uuid;
+            }
+        }
+
+        return null;
+    }
+
+    private unwrapEditorProperty(property: any): any {
+        if (property === undefined || property === null) {
+            return property;
+        }
+
+        if (this.isEditorPropertyWrapper(property)) {
+            return this.unwrapEditorProperty(property.value);
+        }
+
+        return property;
+    }
+
+    private isEditorPropertyWrapper(property: any): boolean {
+        if (!property || typeof property !== 'object' || Array.isArray(property)) {
+            return false;
+        }
+
+        if (!Object.prototype.hasOwnProperty.call(property, 'value')) {
+            return false;
+        }
+
+        const wrapperKeys = ['type', 'default', 'readonly', 'visible', 'animatable', 'displayName', 'extends'];
+        return wrapperKeys.some((key) => Object.prototype.hasOwnProperty.call(property, key));
     }
 
     private extractMissingAssets(assetCheck: any): any[] {

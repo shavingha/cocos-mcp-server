@@ -309,9 +309,9 @@ export class DebugTools implements ToolExecutor {
                     resolve({ success: true, data: tree });
                 });
             } else {
-                Editor.Message.request('scene', 'query-hierarchy').then(async (hierarchy: any) => {
+                this.getSceneHierarchyRootNodes().then(async (rootNodes: any[]) => {
                     const trees = [];
-                    for (const rootNode of hierarchy.children) {
+                    for (const rootNode of rootNodes) {
                         const tree = await buildTree(rootNode.uuid);
                         trees.push(tree);
                     }
@@ -386,8 +386,8 @@ export class DebugTools implements ToolExecutor {
 
         if (options.checkPerformance) {
             try {
-                const hierarchy = await Editor.Message.request('scene', 'query-hierarchy');
-                const nodeCount = this.countNodes(hierarchy.children);
+                const rootNodes = await this.getSceneHierarchyRootNodes();
+                const nodeCount = this.countNodes(rootNodes);
 
                 executedChecks.push('performance');
 
@@ -454,6 +454,33 @@ export class DebugTools implements ToolExecutor {
 
             throw err;
         }
+    }
+
+    private async getSceneHierarchyRootNodes(): Promise<any[]> {
+        try {
+            const hierarchy = await Editor.Message.request('scene', 'query-hierarchy');
+            return this.normalizeRootNodes(hierarchy?.children);
+        } catch (err: any) {
+            if (!this.isUnsupportedSceneMessageError(err, 'query-hierarchy')) {
+                throw err;
+            }
+
+            const nodeTree = await Editor.Message.request('scene', 'query-node-tree');
+            if (Array.isArray(nodeTree)) {
+                return this.normalizeRootNodes(nodeTree);
+            }
+
+            const sceneRoot = nodeTree as any;
+            return this.normalizeRootNodes(sceneRoot?.children);
+        }
+    }
+
+    private normalizeRootNodes(nodes: any): any[] {
+        if (!Array.isArray(nodes)) {
+            return [];
+        }
+
+        return nodes.filter(node => node && typeof node === 'object' && node.uuid);
     }
 
     private extractMissingAssets(assetCheck: any): any[] {

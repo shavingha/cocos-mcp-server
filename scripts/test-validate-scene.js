@@ -13,10 +13,14 @@ async function runUnsupportedMessageCase(DebugTools) {
                 }
 
                 if (channel === 'scene' && message === 'query-hierarchy') {
+                    throw new Error('Message does not exist: scene - query-hierarchy');
+                }
+
+                if (channel === 'scene' && message === 'query-node-tree') {
                     return {
                         children: [
-                            { children: [] },
-                            { children: [{ children: [] }] }
+                            { uuid: 'node-1', children: [] },
+                            { uuid: 'node-2', children: [{ uuid: 'node-2-1', children: [] }] }
                         ]
                     };
                 }
@@ -44,6 +48,7 @@ async function runUnsupportedMessageCase(DebugTools) {
     assert.ok(result.data.skippedChecks.includes('missingAssets'));
     assert.ok(result.data.executedChecks.includes('performance'));
     assert.ok(requests.includes('scene:query-hierarchy'));
+    assert.ok(requests.includes('scene:query-node-tree'));
 }
 
 async function runMissingAssetsCase(DebugTools) {
